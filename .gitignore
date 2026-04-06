@@ -1,0 +1,29 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# MLflow
+data/mlflow.db
+mlruns/
+
+# Node
+node_modules/
+frontend/dist/
+
+# OS
+.DS_Store
