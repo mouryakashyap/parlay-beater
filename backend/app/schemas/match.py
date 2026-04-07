@@ -22,6 +22,7 @@ class MatchRead(BaseModel):
     id: int
     api_id: int | None          # external ID from football-data.org; None for manually created matches
     league: str                 # e.g. "PL", "PD", "SA"
+    season: int | None          # year the season started, e.g. 2024 for 2024-25
     matchday: int | None        # round number in the competition
     utc_date: datetime          # kickoff time in UTC
     status: str                 # SCHEDULED | LIVE | FINISHED | POSTPONED

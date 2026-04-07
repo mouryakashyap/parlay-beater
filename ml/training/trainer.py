@@ -22,23 +22,10 @@ from sklearn.metrics import accuracy_score, roc_auc_score
 from xgboost import XGBClassifier
 from sqlalchemy.orm import Session
 
-from ml.features.builder import build_training_dataset
+from ml.features.builder import build_training_dataset, FEATURE_COLS
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
-
-FEATURE_COLS = [
-    "home_form_pts", "away_form_pts",
-    "home_goals_scored_avg", "away_goals_scored_avg",
-    "home_goals_conceded_avg", "away_goals_conceded_avg",
-    "home_venue_goals_scored_avg", "away_venue_goals_scored_avg",
-    "home_venue_goals_conceded_avg", "away_venue_goals_conceded_avg",
-    "h2h_home_win_rate", "h2h_draw_rate", "h2h_away_win_rate",
-    "home_btts_rate", "away_btts_rate",
-    "home_over25_rate", "away_over25_rate",
-    "matchday", "league_code",
-    "home_matches_available", "away_matches_available",
-]
 
 XGB_PARAMS = {
     "n_estimators": 300,

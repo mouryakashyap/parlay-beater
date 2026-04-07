@@ -11,6 +11,7 @@ export interface Match {
   id: number;
   api_id: number | null;
   league: string;
+  season: number | null;
   matchday: number | null;
   utc_date: string;
   status: 'SCHEDULED' | 'LIVE' | 'FINISHED' | 'POSTPONED';
