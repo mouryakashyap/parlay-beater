@@ -9,12 +9,12 @@ Flow:
 Phase 5 will wire in the real ML predictor.
 """
 
-import json
 from sqlalchemy.orm import Session
 
 from app.core.redis import cache_get, cache_set
 from app.repositories import prediction_repo
 from app.models.prediction import Prediction
+from app.schemas.prediction import PredictionRead
 
 
 def _cache_key(match_id: int) -> str:
@@ -34,7 +34,7 @@ def get_prediction_for_match(db: Session, match_id: int) -> list[Prediction] | N
     # 2. DB check
     predictions = prediction_repo.get_by_match(db, match_id)
     if predictions:
-        cache_set(_cache_key(match_id), [p.id for p in predictions])
+        cache_set(_cache_key(match_id), [PredictionRead.model_validate(p).model_dump() for p in predictions])
         return predictions
 
     # 3. TODO Phase 5: call ML predictor, persist, cache, return

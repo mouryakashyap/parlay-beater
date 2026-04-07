@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey, JSON
 from sqlalchemy.orm import relationship
 
@@ -35,7 +35,7 @@ class Prediction(Base):
     # Raw feature snapshot used to generate this prediction (for debugging)
     feature_snapshot  = Column(JSON)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     match = relationship("Match", back_populates="predictions")
 
@@ -51,7 +51,7 @@ class ModelRegistry(Base):
     model_name    = Column(String, nullable=False)   # e.g. "btts", "over_under", "match_result"
     version       = Column(String, nullable=False)   # e.g. "v1.2"
     mlflow_run_id = Column(String)
-    trained_at    = Column(DateTime, default=datetime.utcnow)
+    trained_at    = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     is_active     = Column(Boolean, default=False)   # only one active per model_name
 
     # Validation metrics at training time

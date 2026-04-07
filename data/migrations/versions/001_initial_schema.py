@@ -35,12 +35,12 @@ def upgrade() -> None:
         sa.Column("league",       sa.String(),  nullable=False),
         sa.Column("matchday",     sa.Integer()),
         sa.Column("utc_date",     sa.DateTime(), nullable=False),
-        sa.Column("status",       sa.String(),  default="SCHEDULED"),
+        sa.Column("status",       sa.Enum("SCHEDULED", "LIVE", "FINISHED", "POSTPONED", name="matchstatus"),  default="SCHEDULED"),
         sa.Column("home_team_id", sa.Integer(), sa.ForeignKey("teams.id"), nullable=False),
         sa.Column("away_team_id", sa.Integer(), sa.ForeignKey("teams.id"), nullable=False),
         sa.Column("home_score",   sa.Integer()),
         sa.Column("away_score",   sa.Integer()),
-        sa.Column("result",       sa.String()),
+        sa.Column("result",       sa.Enum("HOME", "DRAW", "AWAY", name="matchresult")),
         sa.Column("created_at",   sa.DateTime()),
         sa.Column("updated_at",   sa.DateTime()),
     )
@@ -98,8 +98,9 @@ def upgrade() -> None:
         sa.Column("feature_snapshot", sa.JSON()),
         sa.Column("created_at",       sa.DateTime()),
     )
-    op.create_index("ix_predictions_id",       "predictions", ["id"])
-    op.create_index("ix_predictions_match_id", "predictions", ["match_id"])
+    op.create_index("ix_predictions_id",           "predictions", ["id"])
+    op.create_index("ix_predictions_match_id",     "predictions", ["match_id"])
+    op.create_index("ix_predictions_match_model",  "predictions", ["match_id", "model_version"])
 
     # ── model_registry ─────────────────────────────────────────────────────────
     op.create_table(
@@ -121,3 +122,5 @@ def downgrade() -> None:
     op.drop_table("match_stats")
     op.drop_table("matches")
     op.drop_table("teams")
+    sa.Enum(name="matchstatus").drop(op.get_bind(), checkfirst=True)
+    sa.Enum(name="matchresult").drop(op.get_bind(), checkfirst=True)

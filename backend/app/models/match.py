@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import Column, Integer, String, DateTime, Float, ForeignKey, Enum
 from sqlalchemy.orm import relationship
 import enum
@@ -37,8 +37,8 @@ class Match(Base):
     away_score   = Column(Integer)
     result       = Column(Enum(MatchResult))
 
-    created_at   = Column(DateTime, default=datetime.utcnow)
-    updated_at   = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     # Relationships
     home_team    = relationship("Team", back_populates="home_matches", foreign_keys=[home_team_id])

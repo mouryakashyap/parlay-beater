@@ -2,7 +2,7 @@
 Match repository — all Match/MatchStats/Odds DB queries live here.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session, joinedload
 from app.models.match import Match, MatchStatus
 
@@ -22,7 +22,7 @@ def get_by_api_id(db: Session, api_id: int) -> Match | None:
 
 def get_upcoming(db: Session, league: str | None = None, days: int = 7) -> list[Match]:
     """Return scheduled matches in the next N days."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     cutoff = now + timedelta(days=days)
     q = (
         db.query(Match)
@@ -39,7 +39,7 @@ def get_upcoming(db: Session, league: str | None = None, days: int = 7) -> list[
 
 def get_finished(db: Session, days_back: int = 7) -> list[Match]:
     """Return recently finished matches."""
-    cutoff = datetime.utcnow() - timedelta(days=days_back)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
     return (
         db.query(Match)
         .filter(Match.status == MatchStatus.FINISHED)
@@ -55,7 +55,7 @@ def upsert(db: Session, match_data: dict) -> Match:
     if existing:
         for key, value in match_data.items():
             setattr(existing, key, value)
-        existing.updated_at = datetime.utcnow()
+        existing.updated_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(existing)
         return existing
