@@ -253,9 +253,21 @@ _MOCK_TEAMS: dict[str, list[tuple[int, str, str]]] = {
         (113, "AC Milan",                "AC Milan"),
         (107, "AS Roma",                 "Roma"),
     ],
+    "BL1": [
+        (5,   "FC Bayern München",       "Bayern"),
+        (4,   "Borussia Dortmund",       "Dortmund"),
+        (3,   "Bayer 04 Leverkusen",     "Leverkusen"),
+        (11,  "VfL Wolfsburg",           "Wolfsburg"),
+    ],
+    "FL1": [
+        (524, "Paris Saint-Germain FC",  "PSG"),
+        (516, "Olympique de Marseille",  "Marseille"),
+        (521, "Olympique Lyonnais",      "Lyon"),
+        (519, "Stade Rennais FC",        "Rennes"),
+    ],
 }
 
-_COUNTRY_MAP = {"PL": "England", "PD": "Spain", "SA": "Italy"}
+_COUNTRY_MAP = {"PL": "England", "PD": "Spain", "SA": "Italy", "BL1": "Germany", "FL1": "France"}
 
 
 def _mock_upcoming(leagues: list[str], days_ahead: int) -> list[FixtureData]:
