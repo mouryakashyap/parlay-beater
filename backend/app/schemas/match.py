@@ -3,6 +3,21 @@ from pydantic import BaseModel
 from app.schemas.team import TeamRead
 
 
+class MatchUpsert(BaseModel):
+    """Used by the ingestion pipeline when upserting matches from the API."""
+    api_id: int
+    league: str
+    season: int | None = None
+    matchday: int | None = None
+    utc_date: datetime
+    status: str = "SCHEDULED"
+    home_team_id: int
+    away_team_id: int
+    home_score: int | None = None
+    away_score: int | None = None
+    result: str | None = None
+
+
 class MatchRead(BaseModel):
     id: int
     api_id: int | None          # external ID from football-data.org; None for manually created matches

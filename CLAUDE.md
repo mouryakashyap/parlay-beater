@@ -19,6 +19,7 @@ Everything runs in Docker. First-time setup: `cp .env.example .env`, then `make 
 | Rollback one migration | `make rollback` |
 | Run tests | `make test` |
 | Manual data ingest | `make ingest` |
+| Backfill historical data | `make backfill` |
 | Backend shell | `make shell-backend` |
 | Postgres shell | `make shell-db` |
 
@@ -40,6 +41,7 @@ No local Python/Node install needed — all commands run inside containers.
 
 ## Key Config
 
+- API docs available at `http://localhost:8000/docs` (Swagger) when backend is running.
 - All env vars consolidated in `backend/app/core/config.py` (`Settings` class). Access via `from app.core.config import settings`.
 - `USE_MOCK_DATA=true` bypasses real API calls — default for dev.
 - `TARGET_LEAGUES` is comma-separated league codes (PL, PD, SA, BL1, FL1).

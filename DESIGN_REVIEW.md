@@ -1,6 +1,6 @@
 # Parlay Beater — Daily Design Review
 
-**Review Date:** 2026-04-06
+**Review Date:** 2026-04-07
 **Reviewer:** Automated Senior Engineer Review
 **Model:** claude-sonnet-4-6
 
@@ -8,301 +8,345 @@
 
 ## Overall Assessment
 
-The project is a well-structured FastAPI/Celery/React stack at the end of Phase 1 — infrastructure is solid, layered architecture is correctly enforced, and the skeleton is genuinely production-grade for a personal learning project. There is one high-severity bug in the cache-aside implementation and several medium-severity issues that should be fixed before Phase 2 starts.
+The project has advanced significantly — the full stack is now present and wired: infra, DB, repositories, services, API, Celery workers, data ingestion with mock data, and a functioning React/TanStack Query frontend. All major issues from the previous review have been resolved. The current state is end-of-Phase-4 (frontend nearly complete) with Phase 5 (ML) not yet started. Three new high-severity issues and several medium/low issues require attention before Phase 5 begins.
 
 ---
 
 ## What's Well-Designed
 
-**Strict layered architecture enforced throughout**
-`routes/ → services/ → repositories/ → models/` is cleanly followed in every module. No route touches the DB directly. No repository contains business logic. This discipline is rare in early-stage personal projects and demonstrates strong architectural instincts.
+**1. Strict layering — zero regressions**
+Routes call services, services call repos, repos run SQL. No route imports from `repositories/` or `models/` directly. No service mutates ORM objects inline (mostly — see H1). This was correct in Phase 1 and remains correct through the frontend phase. The architecture is holding.
 
-**Connection pooling properly configured** (`backend/app/core/database.py`, lines 21–26)
-`pool_pre_ping=True`, `pool_size=10`, `max_overflow=20` — all sensible defaults for a Postgres-backed FastAPI app. The comment explaining the context manager pattern adds real learning value.
+**2. N+1 prevention via `joinedload` in hot paths (`match_repo.py:13, 28`)**
+`get_by_id` and `get_upcoming` both use `joinedload(Match.home_team), joinedload(Match.away_team)`. These load teams in a single SQL JOIN, not one SELECT per match. Correctly placed in the repo layer, not the service or route.
 
-**`joinedload` used in match_repo** (`backend/app/repositories/match_repo.py`, lines 11–14 and 28–30)
-Both `get_by_id` and `get_upcoming` eagerly load `home_team` and `away_team` in a single query. This is the correct fix for the N+1 problem when returning match lists with team data embedded. Junior engineers almost always miss this.
+**3. Composite index on predictions (`001_initial_schema.py:103`)**
+`ix_predictions_match_model ON predictions(match_id, model_version)` covers the most common prediction access pattern — filter by match and optionally by model version. The leftmost prefix rule means it also covers match-only queries. This was added early and remains correct.
 
-**`upsert` pattern in both team_repo and match_repo**
-Idempotent writes are essential for data ingestion pipelines — re-running an ingestion job won't create duplicate rows. `team_repo.upsert` is especially clean using `model_dump(exclude_unset=True)` to only update provided fields.
+**4. Cache-aside pattern — correctly fixed (`prediction_service.py`)**
+Yesterday's HIGH bug (caching integer IDs) is resolved. The service now caches `[PredictionRead.model_validate(p).model_dump() for p in predictions]` — the full serialized shape the client expects. Cache key namespacing (`predictions:match:{id}`) and configurable TTL via `settings.PREDICTION_CACHE_TTL` remain clean.
 
-**Celery configured defensively** (`backend/app/workers/celery_app.py`, lines 35–37)
-`task_acks_late=True` and `worker_prefetch_multiplier=1` are production-grade settings that prevent message loss on worker crash and ensure fair task distribution. Most tutorials leave these at their unsafe defaults.
+**5. Idempotent upserts with typed schemas (`match_repo.py:55`, `team_repo.py:35`)**
+Both upsert functions use typed Pydantic schemas (`MatchUpsert`, `TeamCreate`) and check for existence by `api_id` before inserting. The `api_id is None` guard in `team_repo.upsert` (line 37) prevents accidentally overwriting unrelated teams. These were fixed in Phase 2 and are now correct.
 
-**`bind=True` with retry logic on ingest tasks** (`backend/app/workers/tasks/ingest.py`, lines 17–22)
-The pattern of catching exceptions and calling `self.retry(exc=exc)` with `max_retries=3` and `default_retry_delay=60` is exactly right. External API calls will fail transiently and should not permanently discard work.
+**6. Celery configuration (`celery_app.py`)**
+`task_acks_late=True`, `worker_prefetch_multiplier=1`, `task_track_started=True`, UTC enforced. Beat schedule is sensible: fixtures every 6h, results hourly at `:30`, retrain daily at 3am. Worker and beat in separate containers for independent scaling. Production-grade defaults.
 
-**Beat schedule is well-reasoned** (`celery_app.py`, lines 40–56)
-Fixtures every 6 hours is sensible (match schedules don't change hourly). Results at `:30` past every hour is a smart offset to avoid thundering-herd with other hourly jobs. Daily retraining at 3am UTC avoids peak traffic windows.
+**7. `bind=True` + retry logic on all tasks (`ingest.py`, `train.py`)**
+Every Celery task uses `bind=True` with `max_retries=3, default_retry_delay=60` and calls `self.retry(exc=exc)` on failure. This is the correct pattern for transient API failures.
 
-**Pydantic `model_config = {"from_attributes": True}`** on all Read schemas
-This is the SQLAlchemy 2.0 / Pydantic v2 correct way to enable ORM serialization. All three schemas (`MatchRead`, `PredictionRead`, `TeamRead`) have this — no schema will silently fail to serialize ORM objects.
+**8. Rate limiting in `football_api.py` (`football_api.py:81, 109, 157`)**
+7-second pauses between league requests stay safely under the 10 req/min free-tier limit. The `_get()` helper handles 429 responses with a 65-second sleep and automatic single retry. Deterministic mock data shares `api_id` space with real data so `resolve_finished_matches` can update mock fixtures correctly.
 
-**`ModelRegistry` table designed upfront** (`backend/app/models/prediction.py`, lines 43–58)
-Tracking `model_name`, `version`, `mlflow_run_id`, `is_active`, and `metrics` as a DB table (not just MLflow) enables querying which model version generated which predictions directly in SQL. This is a thoughtful design that pays off heavily in Phase 5.
+**9. `useQueries` parallel prefetch in Dashboard (`Dashboard.tsx:29`)**
+`useQueries` fires all prediction fetches in parallel when a day is selected. The same `queryKey: ['predictions', 'match', m.id]` is reused in `MatchCard` so those renders read from the TanStack Query cache instantly. This is exactly the right TanStack Query pattern.
 
-**Cache-aside key namespacing** (`backend/app/services/prediction_service.py`, line 21)
-`predictions:match:{match_id}` uses colon-delimited namespacing — the Redis community standard. This makes `cache_delete_pattern` queries readable and avoids key collisions.
+**10. `feature_snapshot` column on Prediction (`prediction.py:36`)**
+Storing the feature vector that generated a prediction as a JSON column enables post-hoc debugging, drift detection, and audit without re-running the feature pipeline. This is a thoughtful ML engineering detail that pays off heavily in Phase 5.
 
-**Frontend API client is clean** (`frontend/src/api/client.ts`)
-Single Axios instance with `baseURL` configured centrally. All API functions are one-liners that return `.data` directly. TanStack Query wraps these correctly in Dashboard.tsx with `queryKey` and `queryFn`.
+**11. `ModelRegistry` table (`prediction.py:43`)**
+Tracks `model_name`, `version`, `mlflow_run_id`, `is_active`, and `metrics` in DB. The `is_active` flag enables promoting a new model version without redeploying — it's a feature flag for the production model. `MLFLOW_TRACKING_URI` in config means MLflow is wired up even before training starts.
+
+**12. TypeScript types aligned with backend schemas (`types.ts`)**
+`Match`, `Prediction`, `Team`, and `MatchListResponse` in `frontend/src/types.ts` match the Pydantic schemas exactly, including `null` handling on optional fields. The axios client returns typed promises, and TanStack Query generic types flow correctly into component props.
 
 ---
 
 ## Issues Found
 
-### HIGH Severity
+### HIGH
 
-**BUG: Cache stores prediction IDs but route expects Prediction objects**
-- **File:** `backend/app/services/prediction_service.py`, line 37
-- **Problem:** `cache_set(_cache_key(match_id), [p.id for p in predictions])` stores a list of integers. When the cache is warm, `cache_get` returns `[1, 2, 3]` (ints). The route at `predictions.py` line 17 immediately returns this to FastAPI, which tries to serialize it as `list[PredictionRead]`. This will throw a validation error on every cache hit.
-- **Fix:** Cache the full prediction dicts using the Pydantic schema: `cache_set(_cache_key(match_id), [PredictionRead.model_validate(p).model_dump() for p in predictions])`. The cache should store the same shape the client expects, and the route should return the cached dicts directly without re-serializing through the ORM.
+**H1: Direct ORM mutation in `resolve_finished_matches` task — business logic leaking into worker (`ingest.py:102–106`)**
+```python
+match.status     = fixture.status
+match.home_score = fixture.home_score
+match.away_score = fixture.away_score
+match.result     = fixture.result
+db.commit()
+```
+The Celery task is directly mutating a SQLAlchemy ORM object and committing — this is repository work, not task work. The pattern established by every other write in the codebase (`match_repo.upsert`, `team_repo.upsert`, `prediction_repo.mark_result`) is that all DB writes go through a repo function. The task should call a `match_repo.update_result(db, match, fixture)` function. As written, this is the only place in the codebase where a non-repo module commits to the DB, which breaks the architectural contract and will be confusing when debugging.
 
----
+**H2: N+1 query in `get_finished` — teams not eagerly loaded (`match_repo.py:43`)**
+```python
+def get_finished(db: Session, days_back: int = 7) -> list[Match]:
+    return (
+        db.query(Match)
+        .filter(Match.status == MatchStatus.FINISHED)
+        .filter(Match.utc_date >= cutoff)
+        .order_by(Match.utc_date.desc())
+        .all()
+    )
+```
+There is no `joinedload` here. `MatchRead` includes `home_team: TeamRead` and `away_team: TeamRead`. When FastAPI serializes the response, SQLAlchemy issues one SELECT per match to load each team — 50 finished matches = 100 extra queries per `GET /matches/finished` call. `get_upcoming` has `joinedload` (line 28), but `get_finished` does not. Fix: add `.options(joinedload(Match.home_team), joinedload(Match.away_team))` to match the `get_upcoming` pattern.
 
-### MEDIUM Severity
-
-**`datetime.utcnow()` is deprecated in Python 3.12+**
-- **File:** `backend/app/models/match.py` lines 41–42, `backend/app/models/prediction.py` line 38, `backend/app/repositories/match_repo.py` line 58
-- **Problem:** `datetime.utcnow()` was deprecated in Python 3.12 and issues a `DeprecationWarning`. It returns a naive datetime (no timezone info), which can cause subtle bugs when comparing with timezone-aware datetimes.
-- **Fix:** Replace with `datetime.now(timezone.utc)` (import `timezone` from `datetime`). Also consider using SQLAlchemy's `func.now()` for `server_default` to let the database handle timestamp generation.
-
-**Migration uses `sa.String()` for enum columns — diverges from ORM**
-- **File:** `data/migrations/versions/001_initial_schema.py`, lines 40, 43
-- **Problem:** The ORM uses `Column(Enum(MatchStatus))` and `Column(Enum(MatchResult))`, which maps to a PostgreSQL native ENUM type. The migration uses `sa.String()`, which maps to `VARCHAR`. These are not equivalent — PostgreSQL won't enforce valid enum values at the DB level, and Alembic autogenerate will detect a drift and generate a spurious migration.
-- **Fix:** Use `sa.Enum('SCHEDULED', 'LIVE', 'FINISHED', 'POSTPONED', name='matchstatus')` and `sa.Enum('HOME', 'DRAW', 'AWAY', name='matchresult')` in the migration. Or switch the ORM to use `String` with a check constraint if you prefer simpler migrations.
-
-**Missing composite index on `(match_id, model_version)` in predictions**
-- **File:** `backend/app/models/prediction.py` / `data/migrations/versions/001_initial_schema.py`
-- **Problem:** `prediction_repo.get_by_match` filters on both `match_id` and optionally `model_version`. The current index is only on `match_id`. When filtering by both, Postgres cannot use a composite index and must do a full scan of the `match_id` subset.
-- **Fix:** Add `Index('ix_predictions_match_model', 'match_id', 'model_version')` to the `Prediction` model and a corresponding `op.create_index` in the migration.
-
-**`match_repo.upsert` accepts raw `dict` — not type-safe**
-- **File:** `backend/app/repositories/match_repo.py`, line 52
-- **Problem:** `team_repo.upsert` accepts a `TeamCreate` schema (type-safe). `match_repo.upsert` accepts a raw `dict`. This inconsistency means the ingestion task (Phase 2) can pass arbitrary keys and won't get Pydantic validation. A typo in a field name would silently be ignored.
-- **Fix:** Create a `MatchCreate` or `MatchUpsert` Pydantic schema and use it in `match_repo.upsert`, consistent with the pattern in `team_repo`.
-
-**`team_repo.upsert` breaks if `api_id` is `None`**
-- **File:** `backend/app/repositories/team_repo.py`, line 37
-- **Problem:** `get_by_api_id(db, team_in.api_id)` where `api_id` is `None` generates `WHERE api_id IS NULL`. This could accidentally return an existing team with no `api_id` set, and then overwrite its fields with the new team's data.
-- **Fix:** Guard at the top of `upsert`: `if team_in.api_id is None: return create(db, team_in)`.
-
-**No task routing — training task can starve ingestion tasks**
-- **File:** `backend/app/workers/celery_app.py`
-- **Problem:** All three tasks (ingest fixtures, resolve results, retrain models) share the same default queue. A long-running `retrain_all_models` task (which in Phase 5 could take minutes) will block `ingest_upcoming_fixtures` on the same worker if concurrency is exhausted.
-- **Fix:** Route the training task to a dedicated `ml` queue: add `task_routes = {"app.workers.tasks.train.*": {"queue": "ml"}}` to `celery_app.conf`. Run a dedicated `ml-worker` container with `--queues=ml`.
+**H3: `LeagueAccuracySummary` always receives an empty predictions map — bug silently suppresses output (`History.tsx:137`)**
+```tsx
+<LeagueAccuracySummary matches={leagueMatches} leaguePredictions={new Map()} />
+```
+`new Map()` is a fresh empty map every render. Inside `LeagueAccuracySummary`, `withPredictions.filter(m => leaguePredictions.get(m.id))` always returns an empty array, so `withPredictions.length === 0` and the component returns `null` every time. The accuracy summary never renders — this is a data flow bug. The predictions fetched by each `HistoryCard`'s `useQuery` are never surfaced to the parent. Fix: lift the prediction queries to the `History` component using `useQueries`, build the map from match IDs to predictions, then pass it down.
 
 ---
 
-### LOW Severity
+### MEDIUM
 
-**`queryKey` in Dashboard.tsx doesn't include filter params**
-- **File:** `frontend/src/pages/Dashboard.tsx`, line 6
-- **Problem:** `queryKey: ["upcoming-matches"]` is a static key. If the component is ever extended to accept a `league` filter prop, changing the filter won't invalidate the TanStack Query cache because the key doesn't include the param.
-- **Fix:** Always include all query parameters in the key: `queryKey: ["upcoming-matches", league, days]`. Make it a habit even when filters don't exist yet.
+**M1: No cache invalidation after `resolve_finished_matches` updates prediction accuracy (`prediction_service.py`, `ingest.py`)**
+When `prediction_repo.mark_result(...)` updates `result_correct`/`btts_correct`/`over_25_correct`, the stale prediction is still cached in Redis for up to `PREDICTION_CACHE_TTL` (1 hour). The History page will show incorrect accuracy badges during that window. `cache_delete` exists in `redis.py` and is imported but never called here. After marking results, add `from app.core.redis import cache_delete` and call `cache_delete(f"predictions:match:{match.id}")`. One line.
 
-**`match: any` type in Dashboard.tsx**
-- **File:** `frontend/src/pages/Dashboard.tsx`, line 21
-- **Problem:** Bypasses all TypeScript type checking on match data access. A typo like `match.home_teem.name` would not be caught at compile time.
-- **Fix:** Define a `Match` TypeScript interface in `frontend/src/api/types.ts` matching `MatchRead` from the backend schema and use it in the `map` callback.
+**M2: `season` missing from `MatchRead` schema and `frontend/src/types.ts`**
+The `Match` model has a `season` column (added in migration 002). `MatchRead` (`schemas/match.py`) does not include it. `frontend/src/types.ts` doesn't either. The frontend can't display season, and the ML feature pipeline will need season as a categorical input feature. Fix: add `season: int | None = None` to `MatchRead` and `season: number | null` to the frontend `Match` interface.
 
-**`FOOTBALL_DATA_API_KEY` defaults to empty string**
-- **File:** `backend/app/core/config.py`, lines 19–20
-- **Problem:** An empty string is truthy — `if settings.FOOTBALL_DATA_API_KEY` would pass, and the API client would make requests with an empty auth header, getting a 401 instead of a clear "key not configured" error.
-- **Fix:** Use `Optional[str] = None` and check `if settings.FOOTBALL_DATA_API_KEY is not None`. Add startup validation in `lifespan()` that raises if `USE_MOCK_DATA=False` and keys are `None`.
+**M3: `staleTime` unset — TanStack Query refetches on every window focus (`useCalendarMatches.ts`, `Predictions.tsx`, `History.tsx`)**
+Default `staleTime=0` means every window focus event triggers a refetch for all active queries. `useCalendarMatches` fetches 30 days of upcoming + 90 days of finished on every tab switch. For data that changes at most every 6 hours (fixture schedule) or 1 hour (results), this creates unnecessary backend load and UI flicker. Suggested values: `staleTime: 5 * 60 * 1000` (5 minutes) for match queries, `staleTime: 60 * 60 * 1000` (1 hour) for prediction queries.
 
-**No Celery monitoring (Flower) in docker-compose**
-- **File:** `docker-compose.yml`
-- **Problem:** There's no way to inspect task queue depth, task history, or worker status during development. Debugging ingestion failures in Phase 2 will be painful without it.
-- **Fix:** Add a `flower` service: `celery -A app.workers.celery_app flower --port=5555` and expose port 5555.
+**M4: `Predictions.tsx` individual `useQuery` per match vs `Dashboard.tsx` parallel `useQueries`**
+`Dashboard.tsx` correctly uses `useQueries` to fire all prediction fetches in parallel before rendering cards. `Predictions.tsx:PredictionCard` (line 12) uses individual `useQuery` per card — N separate requests fire as components mount, sequentially from React's perspective. This is inconsistent and will cause visible waterfall loading on the Predictions page. Lift prediction queries to the `Predictions` page level using `useQueries`, matching the Dashboard pattern.
 
-**`team.league` column has no index**
-- **File:** `backend/app/models/team.py`, `data/migrations/versions/001_initial_schema.py`
-- **Problem:** `team_repo.get_by_league` runs without an index — full table scan on every league-filtered request.
-- **Fix:** Add `index=True` to the `league` column in `team.py` and `op.create_index("ix_teams_league", "teams", ["league"])` to the migration.
+**M5: No index on `teams.league` — full table scan on every league filter (`team_repo.py:19`, `team.py:13`)**
+`team_repo.get_by_league()` runs `WHERE league = 'PL'` with no supporting index. While the teams table is small now (76 rows), the habit of leaving missing indexes is worth correcting. Add `index=True` to the `league` column in `models/team.py` and add migration 003 with `op.create_index("ix_teams_league", "teams", ["league"])`.
 
-**Backend service has no healthcheck in docker-compose**
-- **File:** `docker-compose.yml`, lines 36–52
-- **Problem:** `frontend` uses `depends_on: backend` without a health condition. If the backend is still starting up (running migrations, loading models), the frontend container starts and initial API calls may fail.
-- **Fix:** Add a healthcheck to the backend service: `test: ["CMD", "curl", "-f", "http://localhost:8000/health"]` and change `frontend.depends_on.backend.condition` to `service_healthy`.
+**M6: `retrain_all_models` logs success when it does nothing (`tasks/train.py:31`)**
+```python
+logger.info("Model retraining complete (stub)")
+```
+The Celery Beat schedule runs this daily at 3am UTC. Logs will show "Model retraining complete" even though no model was trained. This will be misleading when debugging Phase 5. Change the log message to `"Model retraining SKIPPED — ML not implemented yet (Phase 5)"` to make the stub state obvious.
+
+---
+
+### LOW
+
+**L1: `PYTHONPATH=/` is fragile (`docker-compose.yml:44, 65, 80`)**
+All three backend services set `PYTHONPATH=/`. This adds the filesystem root `/` as a Python search path, meaning any top-level directory name (e.g., `/data`, `/ml`) could shadow a stdlib or third-party module. Safer: `PYTHONPATH=/app` (the container's WORKDIR). The current value works because `data` and `ml` don't shadow any installed packages, but it's a footgun.
+
+**L2: Frontend `depends_on: backend` uses default `service_started`, not `service_healthy` (`docker-compose.yml:109`)**
+The frontend container starts the moment Docker marks the backend container as started, not when Uvicorn is actually ready. Early API calls from the frontend dev server will receive connection-refused errors. Add a health check to the backend service:
+```yaml
+healthcheck:
+  test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+  interval: 5s
+  timeout: 3s
+  retries: 5
+```
+Then update `frontend.depends_on.backend.condition` to `service_healthy`.
+
+**L3: `backfill_historical` has only 1 retry and inline `time.sleep` (`ingest.py:134–189`)**
+The backfill fetches multiple seasons and leagues with `time.sleep(7)` between requests. With `max_retries=1`, a transient API failure at season 3 means the whole task fails after one retry with no way to resume where it left off. For a long-running one-shot task, consider either increasing retries or breaking the backfill into per-season sub-tasks. The `time.sleep` inside the task is also not Celery-friendly — if concurrency is 2 and a backfill task is sleeping, it blocks a worker slot.
+
+**L4: `updated_at` uses Python-side `onupdate` lambda — bypassed by bulk SQL updates (`models/match.py:42`)**
+```python
+updated_at = Column(DateTime, onupdate=lambda: datetime.now(timezone.utc))
+```
+SQLAlchemy's `onupdate` fires only for ORM-level updates (e.g., `setattr` + `commit`). If a future migration or admin script uses `db.execute(update(Match).where(...))`, `updated_at` won't be set. For correctness across both access patterns, use `server_default=func.now(), server_onupdate=FetchedValue()` to let Postgres manage the timestamp via a trigger. Not urgent now since all updates go through the ORM, but worth knowing.
+
+**L5: `FOOTBALL_DATA_API_KEY` defaults to empty string — produces confusing 401 errors (`config.py:19`)**
+```python
+FOOTBALL_DATA_API_KEY: str = ""
+```
+An empty string is truthy in Python, so `if settings.FOOTBALL_DATA_API_KEY:` would pass. When `USE_MOCK_DATA=False` and the key is empty, the API client sends `X-Auth-Token: ` and receives a 401, which surfaces as a generic HTTP error with no clear explanation. Change to `Optional[str] = None` and add a startup check in `main.py:lifespan` that raises a clear `ValueError` if `USE_MOCK_DATA=False` and the key is unset.
 
 ---
 
 ## Recommendations
 
-1. **Fix the cache bug immediately** — it's the only thing that actively breaks the prediction flow. After fixing, add a unit test that mocks `cache_get` to return a pre-serialized list and verifies the route returns the correct shape.
+1. **Fix H2 (`get_finished` N+1) immediately** — this is a one-line fix (`joinedload`) with measurable performance impact. Add it before Phase 5 adds more finished-match queries.
 
-2. **Align migration enums with ORM** before Phase 2 writes any real data. Fixing enum drift after data exists requires a complex migration.
+2. **Fix H3 (History accuracy bug)** — lift prediction queries to `History` component using `useQueries`, build the `leaguePredictions` map from `match.id → predictions?.[0]`, pass it down. The accuracy summary is a key product feature and silently broken.
 
-3. **Add a `MatchCreate`/`MatchUpsert` schema** before writing the Phase 2 ingestion client. Type safety at the repo boundary is much easier to add now.
+3. **Move match field mutation to a repo function (H1)** — create `match_repo.update_from_result(db, match_id, status, home_score, away_score, result)` and call it from the Celery task. Keeps the repo boundary clean.
 
-4. **Add Flower to docker-compose now.** You will need it the moment real API calls start failing in Phase 2.
+4. **Wire cache invalidation after result resolution (M1)** — one `cache_delete(f"predictions:match:{match.id}")` call after `prediction_repo.mark_result`. History page accuracy will be fresh immediately.
 
-5. **Fix `datetime.utcnow()`** as a small cleanup — it's a one-liner per file and keeps the codebase clean on Python 3.12+.
+5. **Add `season` to `MatchRead` and `types.ts` (M2)** — needed before Phase 5 feature engineering. Season is a meaningful categorical feature and useful for the UI's display context.
 
-6. **Write at least one integration test** before Phase 2. Test the `/api/v1/matches/upcoming` route with a real DB session using pytest fixtures. The repo and service layers are clean enough to test easily now; doing it before ingestion makes regression detection much simpler.
+6. **Add `staleTime` to all TanStack queries (M3)** — 5 minutes for match data, 1 hour for predictions. Prevents unnecessary refetch on every window focus.
+
+7. **Add `teams.league` index (M5)** — migration 003, two lines.
 
 ---
 
 ## Phase Progress
 
-**Current Phase: End of Phase 1 (Infrastructure + Skeleton) — Complete**
+**Current phase: Phase 4 (Frontend) — nearly complete. One bug remaining (H3).**
 
-What's in place:
-- Docker Compose with full 5-service stack (postgres, redis, backend, celery-worker, celery-beat, frontend)
-- Database models for all entities: teams, matches, match_stats, odds, predictions, model_registry
-- Alembic migration covering all tables and indexes (minor enum drift issue)
-- Repository layer: all CRUD operations for all models, idempotent upserts, N+1-safe joinedloads
-- Service layer: business logic skeleton with cache-aside wired in prediction_service
-- API routes: all read endpoints functional and correctly thin
-- Celery workers: beat schedule defined, tasks stubbed with correct retry scaffolding
-- Frontend: scaffold with TanStack Query wired to a single Dashboard page
+| Phase | Description | Status |
+|-------|-------------|--------|
+| Phase 1 | Infrastructure (Docker, Postgres, Redis, Celery, FastAPI skeleton) | ✅ Complete |
+| Phase 2 | Data model (models, migrations, schemas, repos, services, routes) | ✅ Complete |
+| Phase 3 | Data ingestion (football_api client, Celery tasks, mock data, historical backfill) | ✅ Complete |
+| Phase 4 | Frontend (React, TanStack Query, Dashboard, Predictions, History, components) | 🔶 Nearly complete — fix H3 accuracy bug |
+| Phase 5 | ML model (feature engineering, training, serving, prediction generation) | ❌ Not started — ML dirs are empty stubs |
+| Phase 6 | Advanced features (value bet detection, parlay builder, live scores) | ❌ Not started |
+| Phase 7 | Production hardening (auth, monitoring, rate limiting, alerting) | ❌ Not started |
 
-**What's next (Phase 2 — Data Ingestion):**
-- `data/ingestion/football_api.py` — HTTP client to football-data.org using `httpx`
-- Implement the TODO blocks in `ingest.py` using the existing repo/service layer
-- Seed the database with real fixture data from the API
-- Validate the end-to-end flow: Beat triggers → worker fetches API → repos upsert to DB → frontend displays matches
+**Next concrete step after fixing H2+H3:** Begin `ml/features/` with `build_feature_vector(db, match) → dict` and `build_training_dataset(db, seasons) → pd.DataFrame`. The data is in the DB (2300+ historical matches across 3 seasons); the feature pipeline is the gate to Phase 5.
 
 ---
 
 ## System Design Interview Prep
 
-This section covers each architectural pattern present in the codebase — what it is, how it's implemented here, and how to talk about it in an interview.
+This section covers every architectural pattern present in the codebase. For each: what it is, how this project implements it, and what to say in an interview.
 
 ---
 
 ### 1. Layered Architecture (N-Tier)
 
-**What it is:** The codebase is divided into strict horizontal layers where each layer only calls the layer directly below it. Routes call Services. Services call Repositories. Repositories call Models/DB. No layer skips another.
+**What it is:** The application is divided into strict horizontal layers where each layer only calls the layer directly below it. Routes → Services → Repositories → Models/DB. No layer skips another; no layer reaches up.
 
 **How this project implements it:**
-`matches.py` → `match_service.get_upcoming_matches()` → `match_repo.get_upcoming()` → SQLAlchemy ORM query. No route file imports from `repositories/` or `models/` directly — this is enforced structurally by convention, not a framework rule.
+- `api/v1/routes/matches.py` calls `match_service.get_upcoming_matches()` — no SQL
+- `services/match_service.py` calls `match_repo.get_upcoming()` — no HTTP knowledge
+- `repositories/match_repo.py` runs the query — no business rules, no cache
 
-**The interview angle:** Interviewers ask "how do you structure a backend?" or "how would you make this codebase testable?" Layered architecture is the canonical answer. The key trade-off: it adds indirection (more files, more function calls) but makes each layer independently testable and swappable. A service layer can be unit tested by mocking the repo with no DB connection. A repo can be tested against a test DB with no HTTP layer.
+**The interview angle:** When asked "how would you structure a backend service?" this is the answer. The key insight: each layer can be tested in isolation. A service unit test mocks the repo. A repo integration test hits a real DB without an HTTP layer. Routes are so thin (they just validate input and call a service) that they rarely need unit tests.
 
-**Follow-up questions an interviewer would ask:**
-- "When does this pattern break down?" → When every service method is a one-liner passthrough (as `match_service.py` currently is). The service layer earns its keep as the system grows by handling authorization, caching, and cross-repo orchestration.
-- "How would you handle cross-cutting concerns like logging and authentication?" → Middleware (already in main.py) and FastAPI's dependency injection system (the `Depends` pattern).
+**Trade-offs to discuss:** Layers add indirection. A service method that's a one-liner passthrough (like `match_service.get_upcoming_matches`) adds no immediate value — but it creates the seam for future business logic (authorization, rate limiting, cross-entity orchestration). The alternative is vertical slicing (all code for one feature collocated), which works better when features are truly independent.
 
-**What to say in an interview:** "I separate DB queries into a repository layer so every database access is in one place and can be tested independently. Services hold business logic and orchestrate multiple repos. Routes are thin HTTP adapters — they validate input, call the right service, and return the response. This means I can swap the database or the cache without touching business logic."
+**What to say:** "I use a three-layer architecture: thin routes for HTTP concerns, services for business logic, repos for SQL. Routes never import from repos. This makes each layer independently testable and means I can swap the DB layer — say, from Postgres to Redshift for analytics queries — without touching business logic."
 
 ---
 
-### 2. Cache-Aside Pattern
+### 2. Cache-Aside (Lazy Population)
 
-**What it is:** On a read request, check the cache first. On a cache hit, return immediately without touching the DB. On a miss, fetch from the DB, populate the cache with a TTL, then return. The application code manages cache population — hence "cache-aside" as opposed to "read-through" where the cache itself fetches from the source of truth.
+**What it is:** The application — not the cache — is responsible for loading data into the cache on a miss. Read path: check cache → hit means return immediately; miss means query DB, populate cache with TTL, return. The application manages invalidation explicitly.
 
 **How this project implements it:**
-`prediction_service.get_prediction_for_match()` (`services/prediction_service.py`, lines 24–41). Redis helpers `cache_get`, `cache_set`, `cache_delete` are in `core/redis.py`. TTL is `PREDICTION_CACHE_TTL = 3600` seconds, configurable via environment variable.
+- `prediction_service.py:get_prediction_for_match` — three-step flow: `cache_get` → `prediction_repo.get_by_match` → (Phase 5: ML inference)
+- `redis.py` provides `cache_get`, `cache_set`, `cache_delete`, `cache_delete_pattern` as primitives
+- TTL configured via `settings.PREDICTION_CACHE_TTL = 3600` (env-overridable)
 
-**The interview angle:** This answers "how do you reduce DB load on frequently read data?" and "how do you scale reads past a single DB instance?" Key trade-offs: cache invalidation complexity, stale data window (the TTL), and cold-start behavior (first request after deploy is always a DB hit). Cache-aside is appropriate when reads heavily outnumber writes and some staleness is acceptable — true for match predictions.
+**The interview angle:** Answers "how do you reduce Postgres load for frequently-read data?" and "what caching strategy would you use for prediction results?" Contrast with write-through (update cache on every write — always consistent, more complex), read-through (cache fetches from DB itself — simpler app code, harder to control), and refresh-ahead (proactively refresh before TTL expires — good for predictable access patterns).
 
-**Follow-up questions an interviewer would ask:**
-- "What happens if the cache and DB disagree?" → TTL-based expiry means eventual convergence. For correctness-sensitive data, explicit invalidation (`cache_delete`) on writes is needed — this project has the helper but it's not yet called when predictions are created or updated.
-- "What about thundering herd?" → When a popular cache key expires, many concurrent requests all miss simultaneously and all hit the DB at once. Solutions: probabilistic early expiration, distributed locks (Redlock pattern), or staggered TTLs.
-- "Why cache-aside instead of read-through?" → Read-through requires a cache that understands your data model. Cache-aside keeps Redis as a dumb key-value store, which is simpler, more portable, and works with any cache backend.
+**Trade-offs to discuss:** Cache-aside has three failure modes worth discussing: (1) cache stampede — TTL expires under high traffic, many simultaneous misses all hit the DB; fix with distributed lock (Redlock) or probabilistic early expiration. (2) stale reads during TTL window — acceptable for predictions, not for financial balances. (3) cold start — first deployment has empty cache; fix with pre-warming in `main.py:lifespan` (there's a TODO Phase 2 comment there for exactly this).
 
-**What to say in an interview:** "Cache-aside means the application checks Redis before querying Postgres. On a miss, it fetches from the DB, writes to Redis with a TTL, and returns. This offloads repeated reads for the same prediction. The key trade-off is eventual consistency — during the TTL window, a stale value may be served. I handle invalidation explicitly by deleting the cache key whenever a prediction is updated."
+**What to say:** "Cache-aside with Redis and a 1-hour TTL. On a cache miss the service queries Postgres, serializes via Pydantic, and stores in Redis. Cache-aside is the right choice here: predictions are read far more than written, and a 1-hour stale window is acceptable. Explicit `cache_delete` on result resolution keeps the History page accurate."
 
 ---
 
 ### 3. Connection Pooling
 
-**What it is:** Instead of opening a new database connection on every request — expensive at ~5–15ms per TCP handshake plus authentication — maintain a pool of persistent connections that requests reuse.
+**What it is:** Reusing a fixed set of persistent DB connections across requests rather than opening and closing one per request. Opening a Postgres connection costs ~5–15ms (TCP handshake, auth, SSL). A pool keeps connections alive and lends them to request handlers.
 
 **How this project implements it:**
-`database.py` lines 21–26: `pool_size=10, max_overflow=20, pool_pre_ping=True`. `get_db()` yields a session from `SessionLocal` (which draws from the pool). The context manager pattern (`with SessionLocal() as db`) ensures the session is returned to the pool after the request.
+- `database.py:21` — `create_engine(url, pool_size=10, max_overflow=20, pool_pre_ping=True)`
+- `get_db()` yields a session from `SessionLocal` — session returns to the pool when the `with` block exits
+- `pool_pre_ping=True` — runs `SELECT 1` before handing out a connection to detect stale ones
 
-**The interview angle:** "How do you handle N concurrent requests to a service backed by a single DB?" The pool is the answer. `pool_size` is the steady-state number of open connections. `max_overflow` allows burst capacity above that. With these settings: up to 30 concurrent DB operations per backend container before requests queue for a free connection.
+**The interview angle:** "How many concurrent requests can your backend handle before DB becomes a bottleneck?" `pool_size=10` = 10 simultaneous DB operations per backend container. `max_overflow=20` allows bursting to 30. Beyond that, new requests wait up to `pool_timeout` (30s default) then fail with `TimeoutError`.
 
-**Follow-up questions an interviewer would ask:**
-- "What happens when all pool slots are taken?" → Requests queue for up to `pool_timeout` seconds (default 30s). If the queue exceeds that, SQLAlchemy raises `TimeoutError`, which surfaces as a 500 to the client.
-- "What's `pool_pre_ping` for?" → Before handing a connection from the pool, SQLAlchemy runs `SELECT 1`. If the connection is stale (dropped by Postgres or a firewall timeout), it discards it and opens a fresh one. Without this, stale connections cause cryptic errors under low-traffic conditions.
-- "How do you size the pool?" → Rule of thumb: `pool_size` ≥ max concurrent requests per worker process. With 2 uvicorn workers and 10 concurrent requests each, you'd want `pool_size=20`. Always profile under realistic load.
+**Trade-offs to discuss:** Pool size must be tuned against Postgres's `max_connections` (default 100). With three containers (backend, celery-worker, celery-beat) each at `pool_size=10`, peak is 90 connections — within the default limit. In production with horizontal scaling (multiple backend replicas), PgBouncer in front of Postgres is standard: it multiplexes N app-side connections to M DB-side connections, allowing M << N.
 
-**What to say in an interview:** "Connection pooling keeps a fixed set of open Postgres connections ready. Each request borrows one, uses it, and returns it. Without pooling, at 1000 req/s with a 10ms connection overhead you're burning 10 seconds per second just on handshakes. Pool sizing is a trade-off: too small and requests wait; too large and you exhaust Postgres's `max_connections` parameter."
+**What to say:** "SQLAlchemy maintains a connection pool of 10 persistent connections with burst capacity to 30. `pool_pre_ping` detects stale connections before use — important in containers where the DB can restart independently. At scale I'd add PgBouncer to decouple app-side pooling from Postgres connection limits, which tops out around 100 by default."
 
 ---
 
-### 4. Async Job Queue (Celery + Redis as Broker)
+### 4. Async Job Queue (Celery + Redis)
 
-**What it is:** Work that doesn't need to happen synchronously during an HTTP request is pushed to a queue and processed by separate worker processes. The queue decouples producers (the Beat scheduler or an API trigger) from consumers (workers). Redis here serves dual purpose: message broker and result backend.
+**What it is:** Decoupling long-running or scheduled work from the request-response cycle. A producer (Celery Beat or an API call) pushes a message onto a queue; workers consume and execute asynchronously. The queue survives worker restarts and allows horizontal scaling of consumers independently of producers.
 
 **How this project implements it:**
-`celery_app.py` configures Celery with Redis as broker and backend. `ingest.py` and `train.py` define tasks with `@celery_app.task`. `celery-worker` and `celery-beat` are separate Docker containers sharing the same image.
+- `celery_app.py` — Celery with Redis as both broker and result backend; 3 Beat tasks configured
+- `ingest.py` — `ingest_upcoming_fixtures` (6h), `resolve_finished_matches` (hourly), `backfill_historical` (manual)
+- `train.py` — `retrain_all_models` (daily 3am stub)
+- Separate `celery-worker` and `celery-beat` Docker containers for independent scaling
 
-**The interview angle:** "How would you handle a batch job that runs every 6 hours?" or "How do you avoid blocking the API on slow operations?" The key trade-offs: added operational complexity (queue, workers, and beat to run and monitor), at-least-once delivery semantics (tasks may run more than once on worker crash — idempotency is required), and harder observability (tracing a failure through a queue vs. a request stack).
+**The interview angle:** Answers "how do you handle work that takes longer than an HTTP timeout?" and "how do you call an external API without blocking user requests?" Key follow-ups: at-least-once vs exactly-once delivery (at-least-once is standard; exactly-once requires distributed transactions and is almost never worth the complexity), and task idempotency as the mitigation.
 
-**Follow-up questions an interviewer would ask:**
-- "What's the difference between the worker and beat containers?" → Beat only schedules — it fires tasks by pushing them onto the Redis queue on a cron timer. Workers pull from the queue and execute. Separating them allows independent scaling: add more workers to increase throughput without touching the scheduler.
-- "Why `task_acks_late=True`?" → By default Celery acknowledges (removes from queue) a message when the worker picks it up, before executing. If the worker crashes mid-execution, the task is lost. `acks_late=True` delays acknowledgment until after successful completion, so crashed tasks are redelivered. The trade-off: tasks must be idempotent since they may run more than once.
-- "What's `worker_prefetch_multiplier=1`?" → By default Celery prefetches multiple messages per worker to improve throughput. Setting it to 1 means each worker takes only one task at a time — essential for long-running tasks that would otherwise hold many messages hostage.
+**Trade-offs to discuss:** (1) `task_acks_late=True` — message removed from queue only after task succeeds; crash mid-task means redelivery. Requires idempotency. (2) `worker_prefetch_multiplier=1` — prevents a worker from hoarding tasks it can't execute yet, which matters when tasks have variable duration. (3) No task routing yet — a long-running `retrain_all_models` (minutes in Phase 5) shares the default queue with `ingest_upcoming_fixtures` (seconds). This will cause visible latency on the ingestion pipeline once ML training is wired in.
 
-**What to say in an interview:** "Celery decouples ingestion from the request path. Beat schedules tasks on a cron; workers pull from the Redis queue and execute them. The API never blocks waiting for a fixture fetch. Key design choices: `acks_late=True` for at-least-once delivery, upsert in the repo for idempotency so re-runs never create duplicates, and separate worker/beat containers so workers can be scaled independently."
+**What to say:** "Celery decouples ingestion from the request path. Beat fires tasks on a cron schedule; workers pull from the Redis queue and execute. `acks_late=True` for at-least-once delivery means tasks may run more than once on crash, so every write goes through an idempotent upsert. Beat and Worker run in separate containers so I can scale workers without creating extra scheduler instances."
 
 ---
 
 ### 5. Database Indexing Strategy
 
-**What it is:** Indexes are B-tree data structures that allow the database to locate rows matching a WHERE condition without a full sequential scan. They trade write overhead (every insert/update must update the index) and storage for dramatic read speedups.
+**What it is:** B-tree indexes that allow the DB to locate rows matching a WHERE condition in O(log N) instead of O(N). Every index speeds reads but adds write overhead (every INSERT/UPDATE must update the index tree) and storage.
 
 **How this project implements it:**
-- `matches`: indexes on `id` (PK), `league`, `utc_date`, `status`
-- `predictions`: indexes on `id`, `match_id`
-- `odds`: index on `match_id`
-- `teams`: index on `id` only — `league` is missing (a gap)
+- `matches`: indexes on `id` (PK), `league`, `utc_date`, `status`, `season` — the four filter dimensions used in every match query
+- `predictions`: single-column `match_id` + composite `(match_id, model_version)`
+- `odds`: `match_id` for joins
+- `teams`: `id` only (missing `league` — see M5)
 
-**The interview angle:** "How would you optimize a slow query filtering by league and date?" The primary query in `match_repo.get_upcoming` filters on `status = SCHEDULED`, `utc_date >= now`, `utc_date <= cutoff`, and optionally `league`. The current individual indexes are a reasonable start; the ideal next step is a composite index on `(status, utc_date)` since status is highly selective (3 values).
+**The interview angle:** The composite `(match_id, model_version)` index is a signal of engineering maturity. A composite index on `(A, B)` supports queries filtering on `A` alone (leftmost prefix) and queries filtering on both `A AND B`. It does not support queries filtering on `B` alone. An interviewer will ask: "which column should be first in the composite?" — the more selective one (higher cardinality), or the one that appears in more queries without the other.
 
-**Follow-up questions an interviewer would ask:**
-- "When does an index hurt?" → Every write must update all indexes on the table. Write-heavy tables (like an event log) should minimize indexes. The `matches` table is mostly written by the background ingestion job, so the 4-index overhead is acceptable.
-- "What's a covering index?" → An index that includes all columns a query needs, so Postgres can answer from the index without reading the heap. Example: if `get_upcoming` only needed `utc_date` and `status`, an index on `(status, utc_date)` would be covering.
-- "How do you find missing indexes in production?" → `EXPLAIN ANALYZE` in Postgres. Look for `Seq Scan` on large tables. `pg_stat_user_indexes` shows which indexes are actually being used versus dead weight.
+**Trade-offs to discuss:** Index selectivity matters. An index on `status` (4 possible values across potentially millions of rows) has low selectivity — Postgres may choose a sequential scan anyway if 25% of rows match. A partial index (`WHERE status = 'SCHEDULED'`) would be highly selective and smaller. The current individual indexes are correct starters; a composite `(status, utc_date)` would be the next optimization for the upcoming-matches query.
 
-**What to say in an interview:** "I index columns that appear in WHERE clauses of frequent queries. For matches, `league`, `utc_date`, and `status` cover the most common read pattern — upcoming matches in a given league. For foreign keys like `match_id` on predictions and odds, indexes are critical to avoid full table scans during joins. The trade-off is write amplification: every insert into matches must update 4 indexes."
+**What to say:** "I index based on query patterns. For matches, `league`, `utc_date`, `status`, and `season` cover every filter dimension used in the codebase. For predictions, I have a composite `(match_id, model_version)` because the most common access is 'all predictions for match X from model Y' — and the leftmost prefix rule means it also covers match-only queries for free."
 
 ---
 
-### 6. Idempotent Write Operations (Upsert)
+### 6. Idempotent Writes (Upsert-by-Natural-Key)
 
-**What it is:** An operation that produces the same result whether run once or N times. In data pipelines, this is essential because jobs fail and retry, network timeouts can cause duplicate delivery, and Celery's `acks_late` guarantees at-least-once execution.
+**What it is:** A write operation that produces the same result whether run once or ten times. Essential in any system with at-least-once delivery (Celery, webhooks, retry loops) because re-delivery must not corrupt data.
 
 **How this project implements it:**
-`team_repo.upsert` (`repositories/team_repo.py`, lines 35–44): looks up by `api_id`, updates if found, creates if not. `match_repo.upsert` (`repositories/match_repo.py`, lines 52–66): same pattern. Both use the external `api_id` (from football-data.org) as the deduplication key.
+- `team_repo.upsert`: look up by `api_id` → update fields if found, create if not; guarded for `api_id=None`
+- `match_repo.upsert`: same pattern, using `api_id` from football-data.org as the deduplication key
+- `prediction_repo.mark_result`: checks `pred.result_correct is not None` before updating — skips already-resolved predictions
 
-**The interview angle:** "What happens if your ingestion job runs twice?" This trips up candidates who haven't thought about failure modes. With idempotent upserts, the answer is: the second run overwrites the first with the same data — no duplicates, no errors.
+**The interview angle:** "What happens if your ingestion task runs twice?" is a classic pipeline reliability question. With upsert-by-api_id the answer is: second run produces identical state, no duplicates, no errors. This is the at-least-once + idempotency pattern — the industry standard for data pipelines.
 
-**Follow-up questions an interviewer would ask:**
-- "Is this upsert atomic?" → No — the current implementation is SELECT then INSERT/UPDATE, a TOCTOU race condition under concurrent writers. For a single-writer ingestion job (one Celery task), this is fine. For concurrent writers, use `INSERT ... ON CONFLICT DO UPDATE` (SQLAlchemy: `insert().on_conflict_do_update()`), which is atomic at the DB level.
-- "How does this interact with `task_acks_late=True`?" → Together they form a guarantee: tasks execute at least once, and re-execution is safe. This is a robust pattern for data pipelines.
+**Trade-offs to discuss:** The current upsert is SELECT-then-INSERT/UPDATE — a TOCTOU (time-of-check to time-of-use) race if two workers run the same task concurrently. For a single ingestion worker this is fine. For concurrent writers, `INSERT ... ON CONFLICT DO UPDATE` (SQLAlchemy: `insert().on_conflict_do_update()`) is atomic at the DB level and eliminates the race. This is worth adding before scaling to multiple ingestion workers.
 
-**What to say in an interview:** "All ingestion writes go through an upsert that checks for existence by external API ID before inserting. This makes the ingestion job idempotent — re-running it on failure doesn't create duplicate rows. Combined with `task_acks_late=True` in Celery, I get at-least-once delivery with no data corruption."
+**What to say:** "Every ingestion write goes through an upsert keyed on the external api_id. Re-running the task on failure produces identical state. Combined with `task_acks_late=True`, this gives at-least-once delivery with no data corruption. For concurrent writers I'd replace the SELECT-then-INSERT with a native `INSERT ... ON CONFLICT DO UPDATE` to make the upsert atomic."
 
 ---
 
 ### 7. Scheduled Data Pipeline (ETL)
 
-**What it is:** A system that extracts data from an external source on a schedule, optionally transforms it, and loads it into the application database. Here implemented as a Celery Beat-driven pipeline: Beat fires tasks on a cron, workers execute them.
+**What it is:** Automated extract-transform-load process running on a cron-like schedule. Data is pulled from an external source, normalized, and written to the application DB. Decoupled from user requests; failure doesn't affect API availability.
 
 **How this project implements it:**
-Three Beat jobs in `celery_app.py`: fixtures every 6h, results every 1h at `:30`, model retraining daily at 3am UTC. Task stubs in `ingest.py` show the intended flow: fetch from API → upsert via repos.
+- Celery Beat drives three scheduled tasks (6h fixtures, 1h results, daily retrain)
+- `football_api.py` handles extraction: `fetch_upcoming`, `fetch_finished`, `fetch_season`
+- Repos handle loading: `upsert` functions transform FixtureData → ORM models
+- Mock mode (`USE_MOCK_DATA=True`) allows full pipeline testing without API keys
 
-**The interview angle:** "Design a system that keeps soccer match data current." Key decisions: polling frequency (rate limits, API cost, freshness requirements), failure handling (retry with backoff), and catch-up for missed runs (Celery Beat does NOT auto-backfill).
+**The interview angle:** "Design a system that keeps soccer match data fresh." Key decisions: polling frequency (football-data.org rate limit drives the 6h schedule), failure handling (`self.retry`), and backfill for missed windows. Celery Beat does NOT auto-backfill missed runs — if the Beat container was down, scheduled jobs are skipped without recovery. Production fix: track `last_ingested_at` in a DB or Redis key; on task start, compute the appropriate date window rather than always using "the last 7 days."
 
-**Follow-up questions an interviewer would ask:**
-- "How do you handle API rate limits?" → Exponential backoff in retries (the current `default_retry_delay=60` is linear; production would use `countdown=60 * 2**self.request.retries`). Also, scheduling 6h intervals keeps API call volume low.
-- "What if the Beat container was down for 2 days?" → All 8 fixture jobs are missed with no backfill. A production solution would track `last_ingested_at` in the DB and have the task compute the appropriate time window on startup.
-- "Why separate the results job from the fixtures job?" → Different cadences: fixture schedules change slowly; results land within an hour of the final whistle. Polling results at 1h intervals with a `:30` offset minimizes latency while keeping volume low.
+**What to say:** "The ingestion pipeline is Celery Beat-driven. Fixtures every 6 hours stay within API rate limits. Results every hour minimize latency between match end and DB update. Backfilling historical seasons for ML training is a separate one-shot task. All writes are idempotent so task retries are safe. In production I'd track `last_ingested_at` to recover from Beat outages rather than relying on fixed time windows."
 
-**What to say in an interview:** "The pipeline uses Celery Beat as a distributed cron. Fixtures are polled every 6 hours to stay within API rate limits. Results are checked hourly since they land quickly after matches end. Daily retraining at 3am ensures the model trains on fresh data without competing with peak traffic. All tasks are idempotent so Celery retries on failure are safe."
+---
+
+### 8. ML Model Versioning and Feature Snapshots
+
+**What it is:** Tracking which trained model version generated each prediction, storing the input features, and maintaining a registry of model metadata (accuracy, training date, active flag). This enables debugging, drift detection, and safe model promotion.
+
+**How this project implements it:**
+- `Prediction.model_version` — e.g., "xgb-v1.2"
+- `Prediction.feature_snapshot` — JSON column with the raw feature vector at inference time
+- `ModelRegistry` table — `model_name`, `version`, `mlflow_run_id`, `is_active`, `metrics` JSON
+- `settings.MLFLOW_TRACKING_URI` — wired up even before training starts
+
+**The interview angle:** "How do you safely deploy a new model without breaking the product?" The `is_active` flag in `ModelRegistry` is a feature flag for the production model. Train a new version offline, compare `metrics`, flip `is_active` without redeploying. Roll back by flipping it back. The `feature_snapshot` column answers "why did the model predict 70% home win for this match?" without needing to re-run the feature pipeline.
+
+**Trade-offs to discuss:** Feature snapshots cost storage (JSON per prediction row) but are invaluable for debugging. An alternative is storing only the feature hash and recomputing on demand — but this requires the underlying data to be immutable. Historical match stats can be updated (e.g., xG scores arrive days after the match), making snapshot storage the only reliable option.
+
+**What to say:** "Each prediction stores the model version and the feature vector that generated it. The ModelRegistry tracks all trained versions with MLflow run IDs and validation metrics. The `is_active` flag promotes a model to production without redeployment — I train a new version, compare metrics against the holdout season, and flip the flag. `feature_snapshot` lets me audit any prediction post-hoc."
+
+---
+
+### 9. Frontend Data Fetching with TanStack Query (Stale-While-Revalidate)
+
+**What it is:** A client-side caching and synchronization library that maintains a cache of server state keyed by `queryKey`. On mount, a component checks the cache — if data is fresh (within `staleTime`), it renders from cache without a network request; if stale, it serves the cached data immediately while fetching fresh data in the background (stale-while-revalidate).
+
+**How this project implements it:**
+- `api/client.ts` — centralized axios instance; all API functions return typed promises
+- `useCalendarMatches`, `useLeagueFilter` — custom hooks encapsulating query logic and filter state
+- `Dashboard.tsx` — `useQueries` for parallel prediction prefetch; cards read from the same key instantly
+- Consistent `queryKey` format: `['matches', 'upcoming', days]`, `['predictions', 'match', id]`
+
+**The interview angle:** TanStack Query implements stale-while-revalidate — the browser pattern for serving cached responses while checking for freshness. The interview question is "how do you keep client state in sync with the server without blocking the UI?" The `queryKey` is the cache key; hierarchical keys enable targeted invalidation (`invalidateQueries(['predictions'])` invalidates all prediction queries).
+
+**Trade-offs to discuss:** `staleTime=0` (the current default) means every mount and window focus triggers a refetch. This is appropriate for truly real-time data (e.g., live stock prices) but excessive for match schedules that update every 6 hours. Tuning `staleTime` is the correct fix (M3 above).
+
+**What to say:** "TanStack Query acts as a client-side cache with stale-while-revalidate semantics. Data is served from cache immediately, then refreshed in the background. The queryKey uniquely identifies each dataset — I include all filter params so changing a filter triggers a new fetch. `useQueries` lets me fire N prediction requests in parallel before any card renders, so by the time a user expands a match, its prediction is already in cache."
 
 ---
 
 ## Learning Opportunities
 
-1. **PostgreSQL `INSERT ... ON CONFLICT DO UPDATE` (native atomic upsert).** The current upsert pattern has a subtle TOCTOU race condition under concurrent writes. Learn how `insert().on_conflict_do_update()` in SQLAlchemy 2.0 makes upsert atomic at the DB level. This comes up often in system design interviews when discussing data pipeline correctness and concurrent ingestion workers.
+1. **PostgreSQL `INSERT ... ON CONFLICT DO UPDATE` (atomic upsert).** The current upsert pattern has a subtle TOCTOU race under concurrent writers. Learn SQLAlchemy's `insert().on_conflict_do_update()` and understand why it's atomic where SELECT-then-INSERT is not. This comes up in every data pipeline system design interview.
 
-2. **Celery task routing and priority queues.** The current single-queue setup will become a problem when training tasks (potentially minutes-long in Phase 5) compete with ingestion tasks (seconds-long). Research `task_routes` in Celery and how to dedicate workers per queue with `--queues=ingestion` vs `--queues=ml`. This directly maps to the interview question: "how do you prevent slow jobs from blocking fast jobs?"
+2. **Celery task routing and priority queues.** The single default queue will become a problem in Phase 5 when multi-minute training tasks compete with sub-second ingestion tasks. Research `task_routes`, dedicated queues with `--queues=ingestion` vs `--queues=ml`, and how `worker_prefetch_multiplier` interacts with task duration variance.
 
-3. **TanStack Query cache invalidation strategy.** The current static `queryKey: ["upcoming-matches"]` is a common React Query pitfall. Study how TanStack Query's hierarchical queryKey works for cache invalidation — specifically `invalidateQueries` with partial key matching and how including filter params in the key enables correct cache behavior when filters change. This is the frontend analog of the cache-aside invalidation problem.
+3. **TanStack Query `staleTime`, `gcTime`, and `invalidateQueries`.** The codebase uses TanStack Query with all default settings. Understanding these three levers — and how `staleTime` interacts with the backend Redis TTL to form a two-level cache — will prevent subtle staleness bugs and is a genuinely interesting system design problem (client cache + server cache + source of truth).

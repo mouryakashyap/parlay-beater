@@ -34,6 +34,8 @@ def create(db: Session, team_in: TeamCreate) -> Team:
 
 def upsert(db: Session, team_in: TeamCreate) -> Team:
     """Insert or update based on api_id. Used during data ingestion."""
+    if team_in.api_id is None:
+        return create(db, team_in)
     existing = get_by_api_id(db, team_in.api_id)
     if existing:
         for field, value in team_in.model_dump(exclude_unset=True).items():

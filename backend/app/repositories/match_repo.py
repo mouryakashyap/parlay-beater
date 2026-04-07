@@ -5,6 +5,7 @@ Match repository — all Match/MatchStats/Odds DB queries live here.
 from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session, joinedload
 from app.models.match import Match, MatchStatus
+from app.schemas.match import MatchUpsert
 
 
 def get_by_id(db: Session, match_id: int) -> Match | None:
@@ -51,21 +52,21 @@ def get_finished(db: Session, days_back: int = 7) -> list[Match]:
     )
 
 
-def upsert(db: Session, match_data: dict) -> Match:
+def upsert(db: Session, match_in: MatchUpsert) -> Match:
     """
     Insert or update a match identified by api_id.
     Idempotent — safe to call multiple times with the same data.
     Used by the ingestion task so re-runs don't create duplicate rows.
     """
-    existing = get_by_api_id(db, match_data["api_id"])
+    existing = get_by_api_id(db, match_in.api_id)
     if existing:
-        for key, value in match_data.items():
-            setattr(existing, key, value)
+        for field, value in match_in.model_dump(exclude_unset=True).items():
+            setattr(existing, field, value)
         existing.updated_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(existing)
         return existing
-    match = Match(**match_data)
+    match = Match(**match_in.model_dump())
     db.add(match)
     db.commit()
     db.refresh(match)

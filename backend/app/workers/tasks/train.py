@@ -22,13 +22,11 @@ def retrain_all_models(self):
     """
     logger.info("Starting model retraining...")
     try:
-        # TODO Phase 5:
-        # from ml.training.trainer import Trainer
-        # trainer = Trainer()
-        # trainer.train("match_result")
-        # trainer.train("btts")
-        # trainer.train("over_under")
-        logger.info("Model retraining complete (stub)")
+        from ml.training.trainer import train_all
+        from app.core.database import SessionLocal
+        with SessionLocal() as db:
+            run_ids = train_all(db)
+        logger.info("Model retraining complete — run_ids=%s", run_ids)
     except Exception as exc:
-        logger.error(f"Model retraining failed: {exc}")
+        logger.error("Model retraining failed: %s", exc)
         raise self.retry(exc=exc)

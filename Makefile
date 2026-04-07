@@ -40,7 +40,18 @@ shell-db:
 
 # Trigger a one-off data ingestion job
 ingest:
-	docker compose exec backend python -m app.workers.tasks.ingest
+	docker compose exec -T backend python -c "from app.workers.tasks.ingest import ingest_upcoming_fixtures; ingest_upcoming_fixtures()"
+
+backfill:
+	docker compose exec -T backend python -c "from app.workers.tasks.ingest import backfill_historical; backfill_historical()"
+
+# Train ML models
+train:
+	docker compose exec -T backend python -c "from ml.training.trainer import train_all; from app.core.database import SessionLocal; db=SessionLocal(); train_all(db); db.close(); print('Training complete')"
+
+# Generate predictions for upcoming matches
+predict:
+	docker compose exec -T backend python -c "from ml.serving.predictor import generate_predictions; from app.core.database import SessionLocal; db=SessionLocal(); n=generate_predictions(db); db.close(); print(f'Generated {n} predictions')"
 
 # Run tests (Phase 8)
 test:

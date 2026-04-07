@@ -40,6 +40,8 @@ services:
     ports:
       - "8000:8000"
     env_file: .env
+    environment:
+      - PYTHONPATH=/
     volumes:
       - ./backend:/app
       - ./ml:/ml
@@ -58,6 +60,8 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     env_file: .env
+    environment:
+      - PYTHONPATH=/
     volumes:
       - ./backend:/app
       - ./ml:/ml
@@ -76,6 +80,8 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     env_file: .env
+    environment:
+      - PYTHONPATH=/
     volumes:
       - ./backend:/app
       - ./ml:/ml

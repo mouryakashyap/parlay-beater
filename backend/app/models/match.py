@@ -25,6 +25,7 @@ class Match(Base):
     id           = Column(Integer, primary_key=True, index=True)
     api_id       = Column(Integer, unique=True)         # ID from football-data.org
     league       = Column(String, nullable=False, index=True)
+    season       = Column(Integer, index=True)          # year the season started, e.g. 2024 for 2024-25
     matchday     = Column(Integer)
     utc_date     = Column(DateTime, nullable=False, index=True)
     status       = Column(Enum(MatchStatus), default=MatchStatus.SCHEDULED, index=True)
