@@ -45,6 +45,10 @@ ingest:
 backfill:
 	docker compose exec -T backend python -c "from app.workers.tasks.ingest import backfill_historical; backfill_historical()"
 
+# Backfill xG data from Understat
+xg-backfill:
+	docker compose exec -T backend python -c "from data.ingestion.understat import backfill_xg; from app.core.database import SessionLocal; from app.core.config import settings; from datetime import datetime, timezone; now=datetime.now(timezone.utc); c=now.year if now.month>=8 else now.year-1; db=SessionLocal(); n=backfill_xg(db, settings.target_leagues_list, [c-2,c-1,c]); db.close(); print(f'Upserted {n} xG rows')"
+
 # Train ML models
 train:
 	docker compose exec -T backend python -c "from ml.training.trainer import train_all; from app.core.database import SessionLocal; db=SessionLocal(); train_all(db); db.close(); print('Training complete')"

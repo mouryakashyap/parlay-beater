@@ -35,7 +35,7 @@ def get_prediction_for_match(db: Session, match_id: int) -> list[Prediction]:
     # 2. DB check
     predictions = prediction_repo.get_by_match(db, match_id)
     if predictions:
-        cache_set(_cache_key(match_id), [PredictionRead.model_validate(p).model_dump() for p in predictions])
+        cache_set(_cache_key(match_id), [PredictionRead.model_validate(p).model_dump(mode="json") for p in predictions])
         return predictions
 
     # 3. On-demand ML prediction (only if trained models exist)
@@ -52,7 +52,7 @@ def get_prediction_for_match(db: Session, match_id: int) -> list[Prediction]:
         generate_predictions(db, matches=[match])
         predictions = prediction_repo.get_by_match(db, match_id)
         if predictions:
-            cache_set(_cache_key(match_id), [PredictionRead.model_validate(p).model_dump() for p in predictions])
+            cache_set(_cache_key(match_id), [PredictionRead.model_validate(p).model_dump(mode="json") for p in predictions])
     except Exception:
         logger.exception("On-demand prediction failed for match_id=%d", match_id)
 

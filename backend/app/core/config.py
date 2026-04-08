@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     PREDICTION_CACHE_TTL: int = 3600  # seconds
 
     # ── MLflow ────────────────────────────────────────────────────────────────
-    MLFLOW_TRACKING_URI: str = "sqlite:///data/mlflow.db"
+    MLFLOW_TRACKING_URI: str = "sqlite:////data/mlflow.db"
 
     @property
     def target_leagues_list(self) -> list[str]:

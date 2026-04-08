@@ -49,10 +49,11 @@ class ModelRegistry(Base):
 
     id            = Column(Integer, primary_key=True)
     model_name    = Column(String, nullable=False)   # e.g. "btts", "over_under", "match_result"
-    version       = Column(String, nullable=False)   # e.g. "v1.2"
+    league        = Column(String, nullable=False, default="")  # e.g. "PL", "PD", "SA"
+    version       = Column(String, nullable=False)   # e.g. "v20260408-0003"
     mlflow_run_id = Column(String)
     trained_at    = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    is_active     = Column(Boolean, default=False)   # only one active per model_name
+    is_active     = Column(Boolean, default=False)   # only one active per (model_name, league)
 
     # Validation metrics at training time
     metrics       = Column(JSON)                     # e.g. {"accuracy": 0.61, "roc_auc": 0.71}

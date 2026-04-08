@@ -15,7 +15,7 @@ import pandas as pd
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, and_
 
-from app.models.match import Match, MatchStatus
+from app.models.match import Match, MatchStatus, MatchStats
 
 WINDOW = 5          # rolling window: last N matches used for form features
 LEAGUE_CODES = {"PL": 0, "PD": 1, "SA": 2, "BL1": 3, "FL1": 4}
@@ -30,6 +30,8 @@ FEATURE_COLS = [
     "h2h_home_win_rate", "h2h_draw_rate", "h2h_away_win_rate",
     "home_btts_rate", "away_btts_rate",
     "home_over25_rate", "away_over25_rate",
+    "home_xg_scored_avg", "away_xg_scored_avg",
+    "home_xg_conceded_avg", "away_xg_conceded_avg",
     "matchday", "league_code",
     "home_matches_available", "away_matches_available",
 ]
@@ -42,15 +44,18 @@ def build_features(db: Session, match: Match) -> dict:
     Build a flat feature dict for a single match.
     Works for both upcoming (status=SCHEDULED) and finished matches.
     Uses only matches played strictly before match.utc_date.
+    Form features are scoped to the same competition (match.league) so that
+    cup/other-league matches don't pollute league form signals.
     """
     cutoff = match.utc_date
     home_id = match.home_team_id
     away_id = match.away_team_id
+    league = match.league
 
-    home_recent   = _recent_matches(db, home_id, cutoff, n=WINDOW)
-    away_recent   = _recent_matches(db, away_id, cutoff, n=WINDOW)
-    home_at_home  = _recent_matches(db, home_id, cutoff, n=WINDOW, venue="home")
-    away_at_away  = _recent_matches(db, away_id, cutoff, n=WINDOW, venue="away")
+    home_recent   = _recent_matches(db, home_id, cutoff, n=WINDOW, league=league)
+    away_recent   = _recent_matches(db, away_id, cutoff, n=WINDOW, league=league)
+    home_at_home  = _recent_matches(db, home_id, cutoff, n=WINDOW, venue="home", league=league)
+    away_at_away  = _recent_matches(db, away_id, cutoff, n=WINDOW, venue="away", league=league)
     h2h           = _h2h_matches(db, home_id, away_id, cutoff, n=WINDOW)
 
     features = {
@@ -78,6 +83,12 @@ def build_features(db: Session, match: Match) -> dict:
         "away_btts_rate":    _btts_rate(away_recent),
         "home_over25_rate":  _over25_rate(home_recent),
         "away_over25_rate":  _over25_rate(away_recent),
+
+        # ── xG form (last 5 league matches, None → 0.0 if no stats available) ──
+        "home_xg_scored_avg":   _avg_xg_scored(db, home_recent, home_id),
+        "away_xg_scored_avg":   _avg_xg_scored(db, away_recent, away_id),
+        "home_xg_conceded_avg": _avg_xg_conceded(db, home_recent, home_id),
+        "away_xg_conceded_avg": _avg_xg_conceded(db, away_recent, away_id),
 
         # ── Match context ─────────────────────────────────────────────────────
         "matchday":          match.matchday or 0,
@@ -113,7 +124,8 @@ def build_training_dataset(db: Session, leagues: list[str] | None = None) -> pd.
 
         feats = build_features(db, m)
 
-        feats["match_id"]    = m.id
+        feats["match_id"]     = m.id
+        feats["utc_date"]     = m.utc_date          # kept for recency weighting in trainer
         feats["result_label"] = {"HOME": 0, "DRAW": 1, "AWAY": 2}[m.result.value]
         feats["btts_label"]   = int(m.home_score > 0 and m.away_score > 0)
         feats["over25_label"] = int((m.home_score + m.away_score) > 2)
@@ -130,7 +142,8 @@ def _recent_matches(
     team_id: int,
     before: object,
     n: int,
-    venue: str | None = None,  # "home" | "away" | None (both)
+    venue: str | None = None,   # "home" | "away" | None (both)
+    league: str | None = None,  # scope to a specific competition
 ) -> list[Match]:
     """Return the N most recent FINISHED matches for a team before a given date."""
     q = (
@@ -138,6 +151,8 @@ def _recent_matches(
         .filter(Match.status == MatchStatus.FINISHED)
         .filter(Match.utc_date < before)
     )
+    if league:
+        q = q.filter(Match.league == league)
     if venue == "home":
         q = q.filter(Match.home_team_id == team_id)
     elif venue == "away":
@@ -238,3 +253,33 @@ def _over25_rate(matches: list[Match]) -> float:
     if not finished:
         return 0.0
     return sum(1 for m in finished if (m.home_score + m.away_score) > 2) / len(finished)
+
+
+def _avg_xg_scored(db: Session, matches: list[Match], team_id: int) -> float:
+    """Average xG scored per game from MatchStats. Falls back to 0.0 if no stats."""
+    if not matches:
+        return 0.0
+    values = []
+    for m in matches:
+        stats = db.query(MatchStats).filter(MatchStats.match_id == m.id).first()
+        if stats is None:
+            continue
+        xg = stats.xg_home if m.home_team_id == team_id else stats.xg_away
+        if xg is not None:
+            values.append(xg)
+    return sum(values) / len(values) if values else 0.0
+
+
+def _avg_xg_conceded(db: Session, matches: list[Match], team_id: int) -> float:
+    """Average xG conceded per game from MatchStats. Falls back to 0.0 if no stats."""
+    if not matches:
+        return 0.0
+    values = []
+    for m in matches:
+        stats = db.query(MatchStats).filter(MatchStats.match_id == m.id).first()
+        if stats is None:
+            continue
+        xg = stats.xg_away if m.home_team_id == team_id else stats.xg_home
+        if xg is not None:
+            values.append(xg)
+    return sum(values) / len(values) if values else 0.0
